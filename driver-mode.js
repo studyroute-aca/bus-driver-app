@@ -1,8 +1,9 @@
 (() => {
   'use strict';
+  // BUS DRIVER MODE V4.2: arrival sync, delay accumulation, cancellation, suspension
   const CONFIG = window.BUS_SUPABASE;
   const SB = window.supabase && CONFIG ? window.supabase.createClient(CONFIG.url, CONFIG.publishableKey) : null;
-  const CACHE_KEY='busDelayReportsCacheV3', TOKEN_KEY='busReporterTokenV1', OWNED_KEY='busOwnedReportIdsV1';
+  const CACHE_KEY='busDelayReportsCacheV4', TOKEN_KEY='busReporterTokenV1', OWNED_KEY='busOwnedReportIdsV1';
   const reporterToken=(()=>{let v;try{v=localStorage.getItem(TOKEN_KEY);if(!v){v=crypto.randomUUID();localStorage.setItem(TOKEN_KEY,v)}}catch{v=crypto.randomUUID()}return v})();
   let ownedIds=(()=>{try{return JSON.parse(localStorage.getItem(OWNED_KEY)||'[]')}catch{return[]}})();
   let reports=[],channel=null,currentSnapshot=null,focusMode=false;
@@ -36,7 +37,11 @@
         continue;
       }
       const nd=i===i0?sd+totalDelay:nextDeparture(prevArrival,list[i-1],t),na=nd+duration(t.no),delay=nd-sd;
-      out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(nd),new_arrival:fmtMinute(na),delay_minutes:Math.max(0,delay),recovered:delay<=0,suspended:false});
+      if(i>i0&&delay<=0){
+        out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(sd),new_arrival:fmtMinute(sa),delay_minutes:0,recovered:true,suspended:false});
+        break;
+      }
+      out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(nd),new_arrival:fmtMinute(na),delay_minutes:Math.max(0,delay),recovered:false,suspended:false});
       prevArrival=na;
     }
     return out;
@@ -49,7 +54,11 @@
     let prevArrival=actualArrival;
     for(let i=i0+1;i<list.length;i++){
       const t=list[i],sd=min(t.time),sa=sd+duration(t.no),nd=nextDeparture(prevArrival,list[i-1],t),na=nd+duration(t.no),delay=nd-sd;
-      out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(nd),new_arrival:fmtMinute(na),delay_minutes:Math.max(0,delay),recovered:delay<=0,suspended:false});
+      if(delay<=0){
+        out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(sd),new_arrival:fmtMinute(sa),delay_minutes:0,recovered:true,suspended:false});
+        break;
+      }
+      out.push({no:String(t.no),from:t.from,to:t.to,old_departure:fmtMinute(sd),old_arrival:fmtMinute(sa),new_departure:fmtMinute(nd),new_arrival:fmtMinute(na),delay_minutes:Math.max(0,delay),recovered:false,suspended:false});
       prevArrival=na;
     }
     return out;
@@ -81,7 +90,7 @@
     const affected=calculateFromArrival(origin,actualMinute),old=reportForTrip(origin);
     if(old&&!ownedIds.includes(old.id)){alert('この便には別端末からの通報があります。通報した端末、または運行管理者から到着を確定してください。');return;}
     $('arrivalBtn').disabled=true;
-    const{data,error}=await SB.rpc('record_bus_arrival',{p_report_id:old?.id||null,p_reporter_token:reporterToken,p_service_date:serviceDate(),p_duty:origin.duty,p_origin_trip_no:String(origin.no),p_origin_scheduled_departure:origin.time,p_actual_arrival:fmtMinute(actualMinute),p_delay_minutes:arrivalDelay,p_affected_trips:affected});
+    const{data,error}=await SB.rpc('record_bus_arrival', {p_report_id:old?.id||null,p_reporter_token:reporterToken,p_service_date:serviceDate(),p_duty:origin.duty,p_origin_trip_no:String(origin.no),p_origin_scheduled_departure:origin.time,p_actual_arrival:fmtMinute(actualMinute),p_delay_minutes:arrivalDelay,p_affected_trips:affected});
     $('arrivalBtn').disabled=false;
     if(error){alert(`到着記録に失敗しました: ${error.message}`);return;}
     if(!ownedIds.includes(data.id))ownedIds.push(data.id);saveOwned();reports=[data,...reports.filter(r=>r.id!==data.id)];cache();renderReports();
