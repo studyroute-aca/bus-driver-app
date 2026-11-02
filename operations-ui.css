@@ -5,3 +5,16 @@ header,.topbar,.hero{background:var(--ops-navy)!important;background-image:none!
 .operationsInfo h2,.mapCard h2,.scheduleCard h2,.teamCard h2{font-weight:900!important}
 @media(max-width:760px){.main,main{padding:8px!important}.driverGrid{grid-template-columns:1fr 1fr!important}.reportSummaryLine{grid-template-columns:1fr 1fr}.affectedTable{font-size:12px!important}.operationsInfo{padding:12px!important}}
 @media print{body{background:#fff!important}.driverBtn,.portalHomeButton{display:none!important}}
+
+/* V6.2 operational map vehicle markers */
+.busdot.mapBusActive{z-index:40!important;filter:none!important}
+.busdot.mapBusActive .buspin{width:28px!important;height:28px!important;border:4px solid #fff!important;box-shadow:0 0 0 3px #1769aa,0 5px 12px #0b1f3366!important;background:#1769aa!important}
+.busdot.mapBusDelayed .buspin{background:#d97706!important;box-shadow:0 0 0 3px #d97706,0 5px 12px #0b1f3366!important}
+.busdot.mapBusSevere .buspin{background:#b42318!important;box-shadow:0 0 0 3px #b42318,0 5px 12px #0b1f3366!important}
+.busdot.mapBusActive .buspin:after{top:-18px!important;border-left-width:8px!important;border-right-width:8px!important;border-bottom-width:17px!important;border-bottom-color:#1769aa!important;filter:drop-shadow(0 -1px 0 #fff)}
+.busdot.mapBusDelayed .buspin:after{border-bottom-color:#d97706!important}.busdot.mapBusSevere .buspin:after{border-bottom-color:#b42318!important}
+.mapDirectionBadge{position:absolute;left:50%;top:34px;transform:translateX(-50%);min-width:112px;padding:6px 8px;background:#0b1f33;color:#fff;border:2px solid #fff;border-radius:4px;box-shadow:0 4px 12px #0b1f3355;text-align:center;line-height:1.25;pointer-events:none;white-space:nowrap}
+.mapDirectionBadge:before{content:"";position:absolute;left:50%;top:-7px;transform:translateX(-50%);border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:6px solid #fff}
+.mapDirectionBadge b{font-size:13px}.mapDirectionBadge span{display:block;font-size:11px;color:#d9e5ef;margin-top:2px}.mapDirectionBadge em{display:block;color:#ffd166;font-size:11px;font-style:normal;font-weight:900;margin-top:2px}.mapDirectionBadge em.onTime{color:#73e2b2}
+.busdot.selected .mapDirectionBadge{outline:3px solid #38bdf8;outline-offset:2px}
+@media(max-width:760px){.mapDirectionBadge{min-width:92px;padding:5px 6px}.mapDirectionBadge span{max-width:110px;overflow:hidden;text-overflow:ellipsis}.busdot.mapBusActive .buspin{width:24px!important;height:24px!important}}
