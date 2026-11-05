@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  // BUS DRIVER MODE V5.1: arrival sync, delay accumulation, cancellation, suspension
+  // BUS DRIVER MODE V7: calendar-aware traffic forecast
   const CONFIG = window.BUS_SUPABASE;
   const SB = window.supabase && CONFIG ? window.supabase.createClient(CONFIG.url, CONFIG.publishableKey) : null;
   const CACHE_KEY='busDelayReportsCacheV5', TOKEN_KEY='busReporterTokenV1', OWNED_KEY='busOwnedReportIdsV1';
@@ -10,20 +10,60 @@
   const TRAFFIC_SIM_KEY='busTrafficSimulationEnabledV1';
   let trafficSimulationEnabled=(()=>{try{return localStorage.getItem(TRAFFIC_SIM_KEY)!=='false'}catch{return true}})();
   function stableHash(text){let h=2166136261;for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619)}return(h>>>0)/4294967295}
-  function trafficProfile(minute){
-    const h=(minute/60)%24;
-    if(h>=7&&h<9)return{label:'朝ラッシュ',chance:.82,min:3,max:12,level:'混雑'};
-    if(h>=9&&h<11)return{label:'朝の混雑残り',chance:.48,min:2,max:7,level:'やや混雑'};
-    if(h>=16.5&&h<19.5)return{label:'夕方ラッシュ',chance:.88,min:4,max:15,level:'混雑'};
-    if(h>=19.5&&h<21)return{label:'帰宅混雑の残り',chance:.55,min:2,max:8,level:'やや混雑'};
-    if(h>=11&&h<16.5)return{label:'日中',chance:.28,min:1,max:5,level:'通常'};
-    if(h>=21&&h<23)return{label:'夜間',chance:.18,min:1,max:4,level:'空いている'};
-    return{label:'深夜・早朝',chance:.05,min:1,max:2,level:'非常に空いている'};
+  const JAPAN_HOLIDAYS={
+    '2026-01-01':'元日','2026-01-12':'成人の日','2026-02-11':'建国記念の日','2026-02-23':'天皇誕生日','2026-03-20':'春分の日','2026-04-29':'昭和の日','2026-05-03':'憲法記念日','2026-05-04':'みどりの日','2026-05-05':'こどもの日','2026-05-06':'休日','2026-07-20':'海の日','2026-08-11':'山の日','2026-09-21':'敬老の日','2026-09-22':'休日','2026-09-23':'秋分の日','2026-10-12':'スポーツの日','2026-11-03':'文化の日','2026-11-23':'勤労感謝の日',
+    '2027-01-01':'元日','2027-01-11':'成人の日','2027-02-11':'建国記念の日','2027-02-23':'天皇誕生日','2027-03-21':'春分の日','2027-03-22':'休日','2027-04-29':'昭和の日','2027-05-03':'憲法記念日','2027-05-04':'みどりの日','2027-05-05':'こどもの日','2027-07-19':'海の日','2027-08-11':'山の日','2027-09-20':'敬老の日','2027-09-23':'秋分の日','2027-10-11':'スポーツの日','2027-11-03':'文化の日','2027-11-23':'勤労感謝の日'
+  };
+  const dateKey=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+  const addDays=(d,n)=>{const x=new Date(d);x.setUTCDate(x.getUTCDate()+n);return x};
+  const isDayOff=d=>{const day=d.getUTCDay();return day===0||day===6||!!JAPAN_HOLIDAYS[dateKey(d)]};
+  function calendarContext(dateText=serviceDate()){
+    const d=new Date(`${dateText}T00:00:00Z`),dow=d.getUTCDay(),dayNames=['日','月','火','水','木','金','土'];
+    let start=d,end=d;while(isDayOff(addDays(start,-1)))start=addDays(start,-1);while(isDayOff(addDays(end,1)))end=addDays(end,1);
+    const off=isDayOff(d),length=off?Math.round((end-start)/86400000)+1:0,index=off?Math.round((d-start)/86400000)+1:0;
+    const md=(d.getUTCMonth()+1)*100+d.getUTCDate();
+    let season='通常期',seasonFactor=1;
+    if(md>=429&&md<=506){season='ゴールデンウィーク';seasonFactor=1.5}
+    else if(md>=810&&md<=817){season='お盆';seasonFactor=1.45}
+    else if(md>=919&&md<=923){season='秋の大型連休';seasonFactor=1.45}
+    else if(md>=1227||md<=104){season='年末年始';seasonFactor=1.55}
+    let holidayStage='通常日',holidayFactor=1;
+    if(length>=3){holidayStage=index===1?'連休初日':index===length?'連休最終日':'連休中日';holidayFactor=index===1?1.7:index===length?1.85:1.35}
+    else if(!off&&isDayOff(addDays(d,1))&&isDayOff(addDays(d,2))){holidayStage='連休前日';holidayFactor=1.35}
+    else if(off){holidayStage=JAPAN_HOLIDAYS[dateText]||'土日';holidayFactor=1.15}
+    return{dateText,dow,dayName:dayNames[dow]+'曜日',off,length,index,holidayStage,holidayFactor,season,seasonFactor};
+  }
+  function trafficProfile(minute,t=null){
+    const h=(minute/60)%24,cal=calendarContext(),weekend=cal.off;
+    let base;
+    if(h>=3&&h<5)base={label:'深夜・早朝',chance:.02,min:1,max:2,level:'非常に空いている'};
+    else if(h<6.5)base={label:'早朝移動',chance:.08,min:1,max:3,level:'空いている'};
+    else if(h<7.5)base={label:'朝の交通増加',chance:.35,min:2,max:6,level:'やや混雑'};
+    else if(h<9.5)base={label:'朝ラッシュ',chance:.80,min:4,max:14,level:'混雑'};
+    else if(h<11)base={label:'朝の混雑残り',chance:.48,min:2,max:8,level:'やや混雑'};
+    else if(h<15.5)base={label:'日中',chance:.25,min:1,max:5,level:'通常'};
+    else if(h<17)base={label:'夕方への移行',chance:.42,min:2,max:7,level:'やや混雑'};
+    else if(h<19.5)base={label:'夕方ラッシュ',chance:.85,min:5,max:16,level:'混雑'};
+    else if(h<21)base={label:'帰宅混雑',chance:.55,min:2,max:9,level:'やや混雑'};
+    else if(h<23)base={label:'夜間',chance:.18,min:1,max:4,level:'空いている'};
+    else base={label:'深夜',chance:.03,min:1,max:2,level:'非常に空いている'};
+    let weekdayFactor=[.82,1.15,1,1,1.05,1.2,.95][cal.dow];
+    if(weekend&&h>=7&&h<9.5)weekdayFactor*=.55;
+    if(weekend&&h>=9.5&&h<15.5)weekdayFactor*=1.45;
+    if((cal.dow===0||JAPAN_HOLIDAYS[cal.dateText])&&h>=16&&h<19.5)weekdayFactor*=1.5;
+    let holidayFactor=cal.holidayFactor;
+    if(cal.holidayStage==='連休初日'&&h>=5&&h<11)holidayFactor*=1.7;
+    if(cal.holidayStage==='連休最終日'&&h>=13&&h<21)holidayFactor*=1.55;
+    if(cal.holidayStage==='連休前日'&&h>=16&&h<22)holidayFactor*=1.3;
+    let directionFactor=1,direction='';
+    if(t){direction=t.to==='空港'?'空港方面':'ホテル方面';if(direction==='ホテル方面'&&cal.holidayStage==='連休初日'&&h<14)directionFactor=1.2;if(direction==='空港方面'&&cal.holidayStage==='連休最終日'&&h>=13)directionFactor=1.25;if(direction==='空港方面'&&cal.season==='お盆'&&h>=13)directionFactor=1.15}
+    const total=Math.min(3,weekdayFactor*holidayFactor*cal.seasonFactor*directionFactor),chance=Math.min(.95,base.chance*total),min=Math.max(1,Math.round(base.min*Math.sqrt(total))),max=Math.min(30,Math.max(min,Math.round(base.max*total)));
+    let level=chance>=.8?'非常に混雑':chance>=.55?'混雑':chance>=.3?'やや混雑':chance>=.12?'通常':'空いている';
+    return{...base,chance,min,max,level,calendar:cal,direction,totalFactor:total};
   }
   function simulatedDelay(t){
     if(!trafficSimulationEnabled)return 0;
-    const profile=trafficProfile(min(t.time));
-    const key=`${serviceDate()}|${t.duty}|${t.time}|${t.no}|traffic-v1`;
+    const profile=trafficProfile(min(t.time),t),key=`${serviceDate()}|${t.duty}|${t.time}|${t.no}|traffic-calendar-v1`;
     if(stableHash(key)>profile.chance)return 0;
     return Math.round(profile.min+stableHash(key+'|minutes')*(profile.max-profile.min));
   }
@@ -93,17 +133,17 @@
   const card=document.createElement('section');card.id='driverModeCard';card.className='driverModeCard';card.innerHTML=`<div class="driverTop"><div class="driverBadge" id="driverBadge">● 接続中</div><div class="driverClock" id="driverClock">00:00:00</div></div><div class="driverTitle" id="driverTitle">勤務を確認しています</div><div class="driverRoute" id="driverRoute">--</div><div class="driverGrid"><div class="driverInfo"><span>到着・終了まで</span><b id="driverCountdown">--</b></div><div class="driverInfo"><span>次の担当</span><b id="driverNext">--</b></div><div class="driverInfo"><span>折返し時間</span><b id="driverTurn">--</b></div><div class="driverInfo"><span>現在の遅延</span><b id="driverDelay">0分</b></div></div><div class="driverActions"><button class="driverBtn" id="arrivalBtn">到着を記録</button><button class="driverBtn alert" id="reportBtn">異常・遅延を報告</button><button class="driverBtn secondary" id="focusBtn">運転中表示に集中</button></div><div id="syncState" style="font-size:12px;margin-top:10px">リアルタイム接続を準備中</div>`;
   const operations=document.createElement('section');operations.className='operationsInfo';operations.innerHTML=`<div class="infoHeader"><div><h2 style="margin:0">📢 運行情報</h2><div class="muted">遅延・運航不能・変更後時刻を全端末で共有</div></div><span class="pill run" id="reportCount">0件</span></div><div id="reportsList"></div>`;
   const panel=document.createElement('div');panel.className='driverPanel';panel.id='reportPanel';panel.innerHTML=`<div class="driverDialog"><h2 style="margin-top:0">異常・遅延を報告</h2><label>運行状態</label><select id="incidentMode"><option value="delay">さらなる遅延を追加</option><option value="suspended">運航不能（この便以降を運休）</option></select><div id="delayWrap"><label>追加する遅延時間</label><select id="delayMinutes">${[5,10,15,20,30,45,60,90,120].map(v=>`<option value="${v}">${v}分追加</option>`).join('')}</select></div><label>報告種別</label><select id="reportType"><option>遅延</option><option>交通渋滞</option><option>車両故障</option><option>乗客の急病</option><option>事故</option><option>道路通行止め</option><option>乗客トラブル</option><option>その他</option></select><label>状況メモ</label><textarea id="reportMemo" maxlength="500" placeholder="停車中に入力してください"></textarea><div class="driverActions" style="justify-content:flex-end"><button class="driverBtn" id="closeBtn">キャンセル</button><button class="driverBtn alert" id="saveBtn">全ユーザーへ通報</button></div></div>`;
-  const trafficCard=document.createElement('section');trafficCard.className='operationsInfo trafficDemoCard';trafficCard.id='trafficSimulationCard';trafficCard.innerHTML=`<div class="infoHeader"><div><h2 style="margin:0">🚦 デモ交通予測</h2><div class="muted">時間帯別の交通量傾向から、自動でデモ遅延を生成します。</div></div><button class="driverBtn" id="trafficToggle"></button></div><div id="trafficStatus"></div>`;
+  const trafficCard=document.createElement('section');trafficCard.className='operationsInfo trafficDemoCard';trafficCard.id='trafficSimulationCard';trafficCard.innerHTML=`<div class="infoHeader"><div><h2 style="margin:0">🚦 交通予測</h2><div class="muted">曜日・祝日・連休・繁忙期・時間帯を基に交通量を予測します。</div></div><button class="driverBtn" id="trafficToggle"></button></div><div id="trafficStatus"></div>`;
   const toast=document.createElement('div');toast.className='noticeToast';toast.id='noticeToast';
   const main=document.querySelector('main.main');if(!main||typeof trips==='undefined'||typeof duty==='undefined')return;main.prepend(operations);main.prepend(trafficCard);main.prepend(card);document.body.append(panel,toast);
   function renderTraffic(){
-    const now=japanParts(),profile=trafficProfile(now.sec/60);
+    const now=japanParts(),profile=trafficProfile(now.sec/60),cal=profile.calendar;
     const current=trips.filter(t=>{const e=effectiveSchedule(t),m=now.sec/60;return!e.suspended&&m>=e.departure&&m<e.arrival});
     const delayed=current.map(t=>({t,d:simulatedDelay(t)})).filter(x=>x.d>0);
-    $('trafficToggle').textContent=trafficSimulationEnabled?'自動生成を停止':'自動生成を開始';
+    $('trafficToggle').textContent=trafficSimulationEnabled?'交通予測を停止':'交通予測を開始';
     $('trafficToggle').className=trafficSimulationEnabled?'driverBtn alert':'driverBtn';
     $('trafficStatus').innerHTML=trafficSimulationEnabled
-      ? `<div style="margin-top:12px"><b>${profile.label}：${profile.level}</b><div class="trafficDemoList">現在運行中 ${current.length}便／デモ遅延 ${delayed.length}便${delayed.length?'（'+delayed.map(x=>esc(x.t.duty)+'・'+esc(x.t.no)+'便 '+x.d+'分').join('、')+'）':''}</div><div class="trafficDemoWarning">⚠ 自動生成したデモ情報です。実際の道路状況ではありません。</div></div>`
+      ? `<div style="margin-top:12px"><b>${profile.label}：${profile.level}</b><div class="trafficDemoList">${cal.dayName}／${cal.holidayStage}／${cal.season}<br>現在運行中 ${current.length}便／予測遅延 ${delayed.length}便${delayed.length?'（'+delayed.map(x=>esc(x.t.duty)+'・'+esc(x.t.no)+'便 '+x.d+'分').join('、')+'）':''}</div><div class="trafficDemoWarning">⚠ 自動生成した予測情報です。曜日・カレンダー・時間帯を基に算出しています。</div></div>`
       : '<div style="margin-top:12px"><b>自動交通シミュレーションは停止中です</b></div>';
   }
   function autoTrafficReports(){
@@ -114,8 +154,8 @@
       const delay=simulatedDelay(t),departure=min(t.time)+delay;
       return delay>0&&minute>=departure&&minute<departure+duration(t.no);
     }).map(t=>{
-      const delay=simulatedDelay(t),profile=trafficProfile(min(t.time));
-      return{id:`auto-${serviceDate()}-${t.duty}-${t.time}-${t.no}`,service_date:serviceDate(),duty:t.duty,origin_trip_no:String(t.no),origin_scheduled_departure:t.time,delay_minutes:delay,incident_mode:'delay',report_type:'デモ交通予測',memo:`${profile.label}・${profile.level}（自動生成）`,affected_trips:calculateAffected(t,delay,'delay'),active:true,is_simulated:true};
+      const delay=simulatedDelay(t),profile=trafficProfile(min(t.time),t);
+      return{id:`auto-${serviceDate()}-${t.duty}-${t.time}-${t.no}`,service_date:serviceDate(),duty:t.duty,origin_trip_no:String(t.no),origin_scheduled_departure:t.time,delay_minutes:delay,incident_mode:'delay',report_type:'交通予測',memo:`${profile.label}・${profile.calendar.dayName}・${profile.calendar.holidayStage}・${profile.calendar.season}${profile.direction?'・'+profile.direction:''}`,affected_trips:calculateAffected(t,delay,'delay'),active:true,is_simulated:true};
     });
   }
   function renderReports(){
@@ -124,7 +164,7 @@
     $('reportCount').textContent=`${list.length}件`;
     $('reportsList').innerHTML=list.length?list.map(r=>{
       const suspended=r.incident_mode==='suspended',simulated=!!r.is_simulated,owned=!simulated&&ownedIds.includes(r.id);
-      return `<article class="reportCard ${suspended?'suspended':''}" style="${simulated?'border-left-color:#f59e0b;background:#fffbeb':''}"><div class="infoHeader"><div><b>${esc(r.duty)}・${esc(r.origin_trip_no)}便　${suspended?'運航不能':r.delay_minutes+'分遅れ'}${simulated?'　<span style="color:#b45309">［デモ自動］</span>':''}</b><div class="reportMeta">${esc(r.report_type)}${r.actual_arrival?'／実績到着 '+esc(r.actual_arrival):''}${r.memo?'／'+esc(r.memo):''}${simulated?'／実際の道路情報ではありません':'　最終更新 '+new Date(r.updated_at||r.reported_at).toLocaleTimeString('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit'})}</div></div>${owned?`<button class="cancelReportBtn" data-id="${r.id}">この通報を取り消す</button>`:''}</div><table class="affectedTable"><thead><tr><th>便</th><th>区間</th><th>元の時刻</th><th>変更後</th><th>予想</th></tr></thead><tbody>${(r.affected_trips||[]).map(x=>`<tr><td>${esc(x.no)}便</td><td>${esc(x.from)} → ${esc(x.to)}</td><td class="oldTime">${x.old_departure} → ${x.old_arrival}</td><td class="${x.recovered?'recovered':'newTime'}">${x.new_departure} → ${x.new_arrival}</td><td class="${x.recovered?'recovered':'newTime'}">${x.suspended?'運休':x.recovered?'ここから定刻復帰':x.delay_minutes+'分遅れ'}</td></tr>`).join('')}</tbody></table></article>`;
+      return `<article class="reportCard ${suspended?'suspended':''}" style="${simulated?'border-left-color:#f59e0b;background:#fffbeb':''}"><div class="infoHeader"><div><b>${esc(r.duty)}・${esc(r.origin_trip_no)}便　${suspended?'運航不能':r.delay_minutes+'分遅れ'}${simulated?'　<span style="color:#b45309">［交通予測］</span>':''}</b><div class="reportMeta">${esc(r.report_type)}${r.actual_arrival?'／実績到着 '+esc(r.actual_arrival):''}${r.memo?'／'+esc(r.memo):''}${simulated?'／カレンダー・時間帯ベース':'　最終更新 '+new Date(r.updated_at||r.reported_at).toLocaleTimeString('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit'})}</div></div>${owned?`<button class="cancelReportBtn" data-id="${r.id}">この通報を取り消す</button>`:''}</div><table class="affectedTable"><thead><tr><th>便</th><th>区間</th><th>元の時刻</th><th>変更後</th><th>予想</th></tr></thead><tbody>${(r.affected_trips||[]).map(x=>`<tr><td>${esc(x.no)}便</td><td>${esc(x.from)} → ${esc(x.to)}</td><td class="oldTime">${x.old_departure} → ${x.old_arrival}</td><td class="${x.recovered?'recovered':'newTime'}">${x.new_departure} → ${x.new_arrival}</td><td class="${x.recovered?'recovered':'newTime'}">${x.suspended?'運休':x.recovered?'ここから定刻復帰':x.delay_minutes+'分遅れ'}</td></tr>`).join('')}</tbody></table></article>`;
     }).join(''):'<div class="muted" style="padding:22px 0">現在、有効な運行情報はありません。</div>';
     document.querySelectorAll('.cancelReportBtn').forEach(b=>b.onclick=()=>cancelReport(b.dataset.id));
   }
